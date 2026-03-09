@@ -1,82 +1,92 @@
-DHT Milestone — README
-Files Included
+# DHT Milestone
 
-manager.py — UDP manager program
+A distributed hash table implementation over UDP, supporting peer registration, ring-based DHT setup, and distributed record storage.
 
-peer.py — UDP peer program
+---
 
-details-1950.csv — dataset used in milestone demo
+## Files Included
 
-design_document.pdf — milestone design document
+| File | Description |
+|------|-------------|
+| `manager.py` | UDP manager program |
+| `peer.py` | UDP peer program |
+| `details-1950.csv` | Dataset used in milestone demo |
+| `design_document.pdf` | Milestone design document |
+| `README.md` | This file |
 
-README.md — this file
+---
 
-How to Run (Single Machine Testing)
+## How to Run (Single Machine Testing)
 
-1. Start Manager
-   python3 manager.py 20000
-2. Start Three Peers (in separate terminals)
+### 1. Start the Manager
 
-Example:
+```bash
+python3 manager.py 20000
+```
 
+### 2. Start Three Peers (in separate terminals)
+
+```bash
 python3 peer.py 127.0.0.1 20000
+```
 
-At the prompt:
+At the prompt, register each peer with the following details:
 
+| Peer Name | DHT Port | Query Port |
+|-----------|----------|------------|
+| `alphanet` | `21000` | `31000` |
+| `betanet` | `21001` | `31001` |
+| `gammanet` | `21002` | `31002` |
+
+**Example registration input:**
+```
 register
 alphanet
 127.0.0.1
 21000
 31000
+```
 
-Repeat for:
+### 3. Build the DHT
 
-betanet → 21001 / 31001
+On the **leader peer**, run:
 
-gammanet → 21002 / 31002
-
-3. Build the DHT
-
-On the leader peer:
-
+```
 setup-dht 3 1950
+```
 
-Expected behavior:
+**Expected behavior:**
+- Leader assigns IDs to peers using `SET-ID`
+- `STORE` messages circulate around the ring
+- Each peer stores its assigned records
+- Leader prints per-node record counts
+- Leader sends `DHT-COMPLETE`
+- Manager acknowledges
 
-Leader assigns IDs using SET-ID
+---
 
-STORE messages circulate around ring
+## Two-Host Demo Notes
 
-Each peer stores assigned records
+For grading across two machines:
 
-Leader prints per-node record counts
+- Run the **manager** on Host A
+- Run at least one **peer** on Host B
+- Use the manager's **actual IP** (not `127.0.0.1`) when registering remote peers
+- Ensure the firewall allows the chosen ports
 
-Leader sends DHT-COMPLETE
+---
 
-Manager acknowledges
+## Common Errors
 
-Two-Host Demo Notes
+| Error | Cause |
+|-------|-------|
+| `bad-name` | Peer name must be alphabetic only |
+| `port-duplicate` | Each peer must use unique ports |
+| `dataset not found` | Ensure the CSV file is in the leader's working directory |
+| `manager-busy` | Wait until `DHT-COMPLETE` is received before retrying |
 
-For grading:
+---
 
-Run manager on Host A
+## Author
 
-Run at least one peer on Host B
-
-Use manager’s actual IP (not 127.0.0.1) when registering remote peers
-
-Ensure firewall allows chosen ports
-
-Common Errors
-
-bad-name → name must be alphabetic
-
-port-duplicate → use unique ports
-
-dataset not found → ensure CSV is in leader's directory
-
-manager-busy → wait until DHT-COMPLETE
-
-Author
-
-Pratham Hegde
+**Pratham Hegde
