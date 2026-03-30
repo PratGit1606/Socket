@@ -297,5 +297,7 @@ while True:
     elif cmd == "DEREGISTER":        handle_deregister(fields, addr)
     elif cmd == "TEARDOWN-DHT":      handle_teardown_dht(fields, addr)
     elif cmd == "TEARDOWN-COMPLETE": handle_teardown_complete(fields, addr)
+    elif cmd == "EXIT":
+        sys.exit(0)
     else:
         send_reply(addr, "UNKNOWN", "FAILURE", "unknown-command")

@@ -68,6 +68,19 @@ def first_prime_above(x):
         y += 1
     return y
 
+
+def compute_hash_size(yyyy):
+    """Compute the DHT hash table size from details-YYYY.csv without storing records."""
+    fname = f"details-{yyyy}.csv"
+    try:
+        with open(fname, newline='', encoding='utf-8', errors='ignore') as f:
+            row_count = sum(1 for _ in f) - 1
+    except FileNotFoundError:
+        return 0
+    if row_count <= 0:
+        return 0
+    return first_prime_above(2 * row_count)
+
 def compute_pos_and_id(event_id, s, n):
     pos = event_id % s
     tid = pos % n
@@ -91,10 +104,22 @@ def peer_listener():
         cmd   = parts[0]
 
         if cmd == "SET-ID":
-            _, id_s, n_s, tuple_list = parts[0], parts[1], parts[2], parts[3]
+            # Backward-compatible formats:
+            #   SET-ID|<id>|<n>|<tuple_list>
+            #   SET-ID|<id>|<n>|<hash_size>|<tuple_list>
+            if len(parts) == 5:
+                _, id_s, n_s, hs_s, tuple_list = parts
+            else:
+                _, id_s, n_s, tuple_list = parts[0], parts[1], parts[2], parts[3]
+                hs_s = None
             with state_lock:
                 my_id  = int(id_s)
                 ring_n = int(n_s)
+                if hs_s is not None:
+                    try:
+                        globals()['_dht_hash_size'] = int(hs_s)
+                    except Exception:
+                        pass
                 tuples = [t for t in tuple_list.split(';') if t]
                 peer_tuples = []
                 for t in tuples:
@@ -225,11 +250,17 @@ def peer_listener():
                 print(f"[{NAME}] RESET-ID returned to leave originator")
                 _rebuild_event.set()
             else:
-                nm2, ip2, pp2 = right_neighbor()
-                fwd = f"RESET-ID|{new_id + 1}|{new_n}|{tlist}|{leave_nm}|{orig_nm}|{orig_ip}|{orig_pp}"
-                send_to_peer(ip2, pp2, fwd)
-                print(f"[{NAME}] RESET-ID forwarded -> {nm2}")
-
+                if new_id == new_n - 1:
+                    peer_sock.sendto(
+                        f"RESET-ID|{new_id}|{new_n}|{tlist}|{leave_nm}|{orig_nm}|{orig_ip}|{orig_pp}".encode(),
+                        (orig_ip, orig_pp)
+                    )
+                    print(f"[{NAME}] RESET-ID returned -> {orig_nm}")
+                else:
+                    nm2, ip2, pp2 = right_neighbor()
+                    fwd = f"RESET-ID|{new_id + 1}|{new_n}|{tlist}|{leave_nm}|{orig_nm}|{orig_ip}|{orig_pp}"
+                    send_to_peer(ip2, pp2, fwd)
+                    print(f"[{NAME}] RESET-ID forwarded -> {nm2}")
         elif cmd == "REBUILD-DHT":
             if len(parts) < 5:
                 print(f"[{NAME}] malformed REBUILD-DHT: {s}")
@@ -251,15 +282,16 @@ def peer_listener():
             _rebuild_event.set()
 
         elif cmd == "JOIN-RING":
-            if len(parts) < 4:
+            if len(parts) < 5:
                 continue
-            join_nm  = parts[1]
-            join_ip  = parts[2]
-            join_pp  = int(parts[3])
+            join_nm = parts[1]
+            join_ip = parts[2]
+            join_pp = int(parts[3])
+            yyyy = parts[4]
             print(f"[{NAME}] JOIN-RING from {join_nm}")
             t = threading.Thread(
                 target=leader_handle_join,
-                args=(join_nm, join_ip, join_pp),
+                args=(join_nm, join_ip, join_pp, yyyy),
                 daemon=True
             )
             t.start()
@@ -335,7 +367,7 @@ def collect_counts(ptuples, timeout=5.0):
 
 def leader_build_dht(tuples_str, yyyy):
     """Called after SETUP-DHT SUCCESS. Builds the ring from scratch."""
-    global my_id, ring_n, peer_tuples, local_table, record_count
+    global my_id, ring_n, peer_tuples, local_table, record_count, _dht_hash_size
 
     tuples_raw = [t for t in tuples_str.split(';') if t]
     peer_list  = []
@@ -351,14 +383,17 @@ def leader_build_dht(tuples_str, yyyy):
         my_id       = 0
         ring_n      = n
 
+    s_val = compute_hash_size(yyyy)
+    with state_lock:
+        _dht_hash_size = s_val
+
     for i, (nm, ip, pp) in enumerate(peer_list):
-        msg = f"SET-ID|{i}|{n}|{tuple_list_full}"
+        msg = f"SET-ID|{i}|{n}|{s_val}|{tuple_list_full}"
         send_to_peer(ip, pp, msg)
         print(f"[leader] SET-ID -> {nm} id={i}")
 
     time.sleep(0.3)
-
-    s_val = inject_stores(yyyy, peer_list)
+    inject_stores(yyyy, peer_list)
     time.sleep(0.5)
 
     counts = collect_counts(peer_list)
@@ -376,21 +411,25 @@ def rebuild_ring(yyyy, orig_nm, orig_ip, orig_pp):
     Called on the new leader after a leave or join causes a rebuild.
     Repopulates the ring and notifies the leave/join initiator.
     """
-    global local_table, record_count
+    global local_table, record_count, _dht_hash_size
 
     with state_lock:
         ptuples = list(peer_tuples)
         n       = ring_n
 
     tuple_list_full = ";".join(f"{nm},{ip},{pp}" for nm, ip, pp in ptuples)
+
+    s_val = compute_hash_size(yyyy)
+    with state_lock:
+        _dht_hash_size = s_val
+
     for i, (nm, ip, pp) in enumerate(ptuples):
-        msg = f"SET-ID|{i}|{n}|{tuple_list_full}"
+        msg = f"SET-ID|{i}|{n}|{s_val}|{tuple_list_full}"
         send_to_peer(ip, pp, msg)
         print(f"[{NAME}] REBUILD SET-ID -> {nm} id={i}")
 
     time.sleep(0.3)
-
-    s_val = inject_stores(yyyy, ptuples)
+    inject_stores(yyyy, ptuples)
     time.sleep(0.5)
 
     counts = collect_counts(ptuples)
@@ -402,13 +441,13 @@ def rebuild_ring(yyyy, orig_nm, orig_ip, orig_pp):
     print(f"[{NAME}] REBUILD-DONE sent to {orig_nm}")
 
 
-def leader_handle_join(join_nm, join_ip, join_pp):
+def leader_handle_join(join_nm, join_ip, join_pp, yyyy):
     """
     Called on the current leader when a JOIN-RING message arrives.
     Appends the new peer to the ring, re-numbers, re-populates.
     The current leader stays leader (id=0).
     """
-    global ring_n, peer_tuples
+    global ring_n, peer_tuples, _dht_hash_size
 
     with state_lock:
         old_tuples = list(peer_tuples)
@@ -420,16 +459,19 @@ def leader_handle_join(join_nm, join_ip, join_pp):
         peer_tuples = new_tuples
         ring_n      = new_n
 
-    yyyy = _join_yyyy  
-
     tuple_list_full = ";".join(f"{nm},{ip},{pp}" for nm, ip, pp in new_tuples)
+
+    s_val = compute_hash_size(yyyy)
+    with state_lock:
+        _dht_hash_size = s_val
+
     for i, (nm, ip, pp) in enumerate(new_tuples):
-        msg = f"SET-ID|{i}|{new_n}|{tuple_list_full}"
+        msg = f"SET-ID|{i}|{new_n}|{s_val}|{tuple_list_full}"
         send_to_peer(ip, pp, msg)
         print(f"[{NAME}] JOIN SET-ID -> {nm} id={i}")
 
     time.sleep(0.3)
-    s_val = inject_stores(yyyy, new_tuples)
+    inject_stores(yyyy, new_tuples)
     time.sleep(0.5)
 
     counts = collect_counts(new_tuples)
@@ -442,7 +484,7 @@ def leader_handle_join(join_nm, join_ip, join_pp):
 
 
 def do_query_dht(event_id_str):
-    global my_id, ring_n, peer_tuples
+    global my_id, ring_n, peer_tuples, _dht_hash_size
 
     try:
         ev_id = int(event_id_str)
@@ -468,18 +510,17 @@ def do_query_dht(event_id_str):
         ptuples = list(peer_tuples)
 
     with state_lock:
-        hs = _dht_hash_size if _dht_hash_size else 0
-
-    if hs == 0:
         hs = _dht_hash_size
+
+    if hs <= 0:
+        print("query-dht failed: hash size not initialized")
+        return
 
     pos = ev_id % hs if hs else 0
 
     _query_event.clear()
     _query_result.clear()
 
-    msg = (f"FIND-EVENT|{ev_id}|{hs}|{hn}|{pos}||"
-           f"{NAME}|127.0.0.1|{PPORT}")
     my_ip = _my_ip if _my_ip else "127.0.0.1"
     msg = (f"FIND-EVENT|{ev_id}|{hs}|{hn}|{pos}||"
            f"{NAME}|{my_ip}|{PPORT}")
@@ -562,6 +603,7 @@ def do_leave_dht(yyyy):
     got = _rebuild_event.wait(timeout=15.0)
     if not got:
         print(f"[{NAME}] WARNING: RESET-ID did not return in time")
+        return
 
     with state_lock:
         my_id        = None
@@ -610,7 +652,7 @@ def do_join_dht(yyyy):
 
     _rebuild_event.clear()
 
-    msg = f"JOIN-RING|{NAME}|{my_ip}|{PPORT}"
+    msg = f"JOIN-RING|{NAME}|{my_ip}|{PPORT}|{yyyy}"
     peer_sock.sendto(msg.encode(), (leader_ip, leader_pp))
     print(f"[{NAME}] JOIN-RING -> {leader_nm}. Waiting for REBUILD-DONE...")
 
@@ -622,7 +664,6 @@ def do_join_dht(yyyy):
     send_to_manager(f"DHT-REBUILT|{NAME}|{leader_nm}")
     resp = handle_mgr_receive_blocking(timeout=8.0)
     print(f"[{NAME}] DHT-REBUILT manager reply:", resp)
-
 
 def do_teardown_dht():
     """Leader tears down the DHT."""
@@ -643,6 +684,7 @@ def do_teardown_dht():
         print(f"[{NAME}] WARNING: TEARDOWN did not return in time")
 
     with state_lock:
+        global record_count
         local_table.clear()
         record_count = 0
 
@@ -736,14 +778,6 @@ while True:
         if reply and reply.startswith("MANAGER-REPLY|SETUP-DHT|SUCCESS|"):
             tuples_str = reply.split('|', 3)[3]
             leader_build_dht(tuples_str, yyyy)
-            try:
-                import csv as _csv
-                with open(f"details-{yyyy}.csv", newline='',
-                          encoding='utf-8', errors='ignore') as _f:
-                    _l = sum(1 for _ in _f) - 1
-                globals()['_dht_hash_size'] = first_prime_above(2 * _l)
-            except Exception:
-                globals()['_dht_hash_size'] = 0
         else:
             print("setup-dht failed or not leader")
 
